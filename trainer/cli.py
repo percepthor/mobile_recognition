@@ -294,7 +294,8 @@ def main():
         lr=config.lr_student,
         alpha=config.distill_alpha,
         temperature=config.distill_temperature,
-        output_dir=config.output_dir
+        output_dir=config.output_dir,
+        teacher_input_size=config.teacher_img_size
     )
 
     # === PHASE 5: QAT (if enabled) ===
@@ -314,7 +315,8 @@ def main():
             teacher_model=teacher,
             distill_alpha=config.distill_alpha,
             distill_temperature=config.distill_temperature,
-            output_dir=config.output_dir
+            output_dir=config.output_dir,
+            teacher_input_size=config.teacher_img_size
         )
 
         final_model = qat_model

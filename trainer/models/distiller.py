@@ -24,7 +24,8 @@ class Distiller(keras.Model):
         student: keras.Model,
         teacher: keras.Model,
         alpha: float = 0.5,
-        temperature: float = 4.0
+        temperature: float = 4.0,
+        teacher_input_size: int = 300
     ):
         """
         Initialize distiller.
@@ -34,12 +35,14 @@ class Distiller(keras.Model):
             teacher: Teacher model (will be frozen during training)
             alpha: Weight for hard loss (1-alpha for distill loss)
             temperature: Temperature for soft predictions
+            teacher_input_size: Input size expected by teacher model
         """
         super().__init__()
         self.student = student
         self.teacher = teacher
         self.alpha = alpha
         self.temperature = temperature
+        self.teacher_input_size = teacher_input_size
 
         # Freeze teacher
         self.teacher.trainable = False
@@ -83,8 +86,12 @@ class Distiller(keras.Model):
         """
         x, y = data
 
+        # Resize images for teacher if needed
+        x_teacher = tf.image.resize(x, [self.teacher_input_size, self.teacher_input_size])
+
         # Forward pass through teacher (frozen, no gradients)
-        teacher_logits = self.teacher(x, training=False)
+        # Use stop_gradient to prevent backprop through teacher
+        teacher_logits = tf.stop_gradient(self.teacher(x_teacher, training=False))
 
         with tf.GradientTape() as tape:
             # Forward pass through student
@@ -136,9 +143,12 @@ class Distiller(keras.Model):
         """
         x, y = data
 
+        # Resize images for teacher if needed
+        x_teacher = tf.image.resize(x, [self.teacher_input_size, self.teacher_input_size])
+
         # Forward pass
         student_logits = self.student(x, training=False)
-        teacher_logits = self.teacher(x, training=False)
+        teacher_logits = self.teacher(x_teacher, training=False)
 
         # Compute losses
         hard_loss = self.student_loss_fn(y, student_logits)
@@ -175,7 +185,8 @@ def train_student_with_distillation(
     alpha: float = 0.5,
     temperature: float = 4.0,
     class_weights: Optional[dict] = None,
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    teacher_input_size: int = 300
 ) -> tuple:
     """
     Train student model using knowledge distillation from teacher.
@@ -191,6 +202,7 @@ def train_student_with_distillation(
         temperature: Temperature for soft predictions
         class_weights: Optional class weights (applied to hard loss only)
         output_dir: Directory to save artifacts
+        teacher_input_size: Input size expected by teacher model
 
     Returns:
         Tuple of (trained_student, metrics_dict)
@@ -202,7 +214,8 @@ def train_student_with_distillation(
         student=student,
         teacher=teacher,
         alpha=alpha,
-        temperature=temperature
+        temperature=temperature,
+        teacher_input_size=teacher_input_size
     )
 
     # Compile
@@ -210,6 +223,24 @@ def train_student_with_distillation(
         optimizer=keras.optimizers.Adam(learning_rate=lr),
         metrics=[keras.metrics.SparseCategoricalAccuracy(name='accuracy')]
     )
+
+    # Early stopping to prevent overfitting
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=5,
+        restore_best_weights=True,
+        verbose=1
+    )
+
+    reduce_lr = keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=3,
+        min_lr=1e-6,
+        verbose=1
+    )
+
+    callbacks = [early_stopping, reduce_lr]
 
     # Train
     # Note: class_weights are tricky with custom training loop
@@ -220,6 +251,7 @@ def train_student_with_distillation(
         train_ds,
         validation_data=val_ds,
         epochs=epochs,
+        callbacks=callbacks,
         verbose=1
     )
 

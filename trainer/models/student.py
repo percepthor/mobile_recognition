@@ -63,11 +63,16 @@ def create_student_model(
             input_shape=(input_size, input_size, 3),
             pooling='avg'  # Global average pooling
         )
-        x = backbone(x, training=True)
+        # Let training mode be determined dynamically
+        x = backbone(x)
 
-    # Head (simple for mobile deployment)
-    x = keras.layers.Dropout(0.2, name='dropout')(x)
-    outputs = keras.layers.Dense(num_classes, name='logits')(x)  # No softmax
+    # Head with regularization to prevent overfitting
+    x = keras.layers.Dropout(0.4, name='dropout')(x)  # Increased dropout
+    outputs = keras.layers.Dense(
+        num_classes,
+        name='logits',
+        kernel_regularizer=keras.regularizers.l2(0.01)  # L2 regularization
+    )(x)  # No softmax
 
     model = keras.Model(inputs=inputs, outputs=outputs, name='student_efficientnet_lite1')
 

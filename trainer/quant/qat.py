@@ -57,7 +57,8 @@ def fine_tune_qat_model(
     teacher_model: Optional[keras.Model] = None,
     distill_alpha: float = 0.5,
     distill_temperature: float = 4.0,
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    teacher_input_size: int = 300
 ) -> tuple:
     """
     Fine-tune QAT model.
@@ -76,6 +77,7 @@ def fine_tune_qat_model(
         distill_alpha: Alpha for distillation (if teacher provided)
         distill_temperature: Temperature for distillation (if teacher provided)
         output_dir: Directory to save QAT model
+        teacher_input_size: Input size expected by teacher model
 
     Returns:
         Tuple of (qat_model, metrics_dict)
@@ -98,7 +100,8 @@ def fine_tune_qat_model(
                 student=qat_model,
                 teacher=teacher_model,
                 alpha=distill_alpha,
-                temperature=distill_temperature
+                temperature=distill_temperature,
+                teacher_input_size=teacher_input_size
             )
 
             distiller.compile(

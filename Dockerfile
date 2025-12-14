@@ -1,5 +1,5 @@
 # Image Recognition Training Container
-FROM python:3.10-slim
+FROM tensorflow/tensorflow:2.15.0-gpu
 
 # Set working directory
 WORKDIR /app

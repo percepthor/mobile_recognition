@@ -25,9 +25,9 @@ class TrainingConfig:
     val_frac: float = 0.1
     test_frac: float = 0.1
     batch_size: int = 32
-    epochs_teacher: int = 10
-    epochs_student: int = 20
-    epochs_qat: int = 10
+    epochs_teacher: int = 30  # With early stopping, will stop when val_loss plateaus
+    epochs_student: int = 40  # With early stopping, will stop when val_loss plateaus
+    epochs_qat: int = 15
     lr_teacher: float = 1e-3
     lr_student: float = 1e-3
     lr_qat: float = 1e-4
