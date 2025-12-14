@@ -1,0 +1,6 @@
+{
+  "labels_path": "labels.txt",
+  "threshold_path": "threshold_recommendation.json",
+  "unknown_label": "desconocido",
+  "num_threads": 2
+}

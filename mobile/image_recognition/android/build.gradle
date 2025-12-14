@@ -1,0 +1,91 @@
+group 'com.percepthor.image_recognition'
+version '1.0.0'
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.3.0'
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    compileSdkVersion 33
+
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 33
+
+        // Specify ABIs to include
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    sourceSets {
+        main {
+            // Native libraries location
+            // Place libimage_recognition.so and libtensorflowlite_c.so in:
+            // android/src/main/jniLibs/<abi>/
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+/*
+ * IMPORTANT: Native Library Setup
+ *
+ * This plugin requires two native libraries for each ABI:
+ *
+ * 1. libimage_recognition.so (this project's native code)
+ *    - Build with: native/build/build_android_all.sh
+ *    - Copy to: android/src/main/jniLibs/<abi>/libimage_recognition.so
+ *
+ * 2. libtensorflowlite_c.so (TensorFlow Lite C API)
+ *    - Build with Bazel (see native/build/build_tflite_android.sh)
+ *    - Copy to: android/src/main/jniLibs/<abi>/libtensorflowlite_c.so
+ *
+ * Required ABIs:
+ *  - arm64-v8a (64-bit ARM, most modern Android devices)
+ *  - armeabi-v7a (32-bit ARM, older devices)
+ *  - x86 (32-bit emulator)
+ *  - x86_64 (64-bit emulator)
+ *
+ * Directory structure:
+ *  android/src/main/jniLibs/
+ *    ├── arm64-v8a/
+ *    │   ├── libimage_recognition.so
+ *    │   └── libtensorflowlite_c.so
+ *    ├── armeabi-v7a/
+ *    │   ├── libimage_recognition.so
+ *    │   └── libtensorflowlite_c.so
+ *    ├── x86/
+ *    │   ├── libimage_recognition.so
+ *    │   └── libtensorflowlite_c.so
+ *    └── x86_64/
+ *        ├── libimage_recognition.so
+ *        └── libtensorflowlite_c.so
+ */

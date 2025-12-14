@@ -1,0 +1,47 @@
+# Flutter/Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Generated files
+lib/src/bindings.g.dart
+
+# Native build artifacts
+native/build/
+native/third_party/tensorflow/
+*.o
+*.a
+*.so
+*.dylib
+
+# Android
+android/src/main/jniLibs/*/libimage_recognition.so
+android/src/main/jniLibs/*/libtensorflowlite_c.so
+android/.gradle/
+android/local.properties
+
+# iOS
+ios/libs/*.a
+ios/Frameworks/TensorFlowLiteC.framework
+*.xcworkspace
+*.xcuserdata
+Pods/
+
+# Model files (too large for git)
+*.tflite
+example/assets/image_recognition/*.tflite
+example/assets/image_recognition/labels.txt
+example/assets/image_recognition/threshold_recommendation.json
+
+# macOS
+.DS_Store

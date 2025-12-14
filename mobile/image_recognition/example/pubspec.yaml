@@ -1,0 +1,31 @@
+name: image_recognition_example
+description: Example app demonstrating image_recognition plugin
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  image_recognition:
+    path: ../
+  image_picker: ^1.0.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
+
+  # Include model assets
+  # NOTE: You must place the trained model files in these locations:
+  # - assets/image_recognition/model_qat_int8.tflite
+  # - assets/image_recognition/labels.txt
+  # - assets/image_recognition/threshold_recommendation.json
+  # - assets/image_recognition/runtime_config.json
+  assets:
+    - assets/image_recognition/
