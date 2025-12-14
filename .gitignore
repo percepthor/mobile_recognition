@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Training outputs (don't commit large artifacts)
+output/
+*.tflite
+*.h5
+*.pb
+saved_model/
+
+# Logs
+*.log
+logs/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# Test artifacts
+smoke_test_temp/
+
+# TensorBoard
+events.out.tfevents.*
+
+# Claude
+.claude/

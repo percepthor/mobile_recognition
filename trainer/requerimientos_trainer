@@ -1,0 +1,697 @@
+## **0\) Objetivo del contenedor de entrenamiento**
+
+Implementar un proyecto reproducible que, dado:
+
+* `--data_dir=/ruta/dataset` con estructura:
+* `/ruta/dataset/<clase_1>/*.jpg|png`
+* `/ruta/dataset/<clase_2>/*.jpg|png`
+* …
+
+Genere en `--output_dir=/ruta/salida` como mínimo:
+
+* `model_qat_int8.tflite` (modelo final cuantizado **full integer**, alumno EfficientNet‑Lite1, input 240×240).
+
+* `labels.txt` (lista de clases **en el orden exacto** usado por el modelo).
+
+* `confusion_matrix.png` (y recomendado: `confusion_matrix.csv`).
+
+* `threshold_recommendation.json` con `recommended_threshold` y `calibration_notes`.
+
+* `model_metadata.json` (preprocesamiento exacto \+ quant params de entrada/salida).
+
+* (Recomendado) `metrics.json`, `training_config.json`, `run_metadata.json`, `reliability_diagram.png`, `threshold_curve.csv`.
+
+---
+
+## **1\) Estructura del repositorio (obligatoria)**
+
+Crear esta estructura exacta:
+
+`image_recognition_training/`  
+  `Dockerfile`  
+  `requirements.txt`  
+  `README.md`
+`trainer/`  
+    `__init__.py`  
+    `cli.py`  
+    `config.py`
+  `data/`  
+      `dataset_scan.py`  
+      `split.py`  
+      `tfdata.py`  
+      `preprocess.py`
+  `models/`  
+      `teacher.py`  
+      `student.py`  
+      `distiller.py`
+  `quant/`  
+      `qat.py`  
+      `tflite_export.py`  
+      `rep_dataset.py`
+  `eval/`  
+      `metrics.py`  
+      `confusion_matrix.py`  
+      `threshold.py`  
+      `tflite_runner.py`  
+      `calibration.py`
+  `utils/`  
+      `seed.py`  
+      `io.py`  
+      `logging.py`  
+      `versioning.py`
+`scripts/`  
+    `run_in_docker.sh`  
+    `smoke_test.sh`
+
+**Regla:** todo lo que produzca el contenedor debe salir únicamente en `--output_dir`. No escribir artefactos “sueltos” en el filesystem del contenedor (excepto logs temporales).
+
+---
+
+## **2\) Interfaz de línea de comando (obligatoria)**
+
+Implementar `python -m trainer.cli` con estos argumentos (nombres exactos):
+
+### **2.1 Argumentos principales**
+
+* `--data_dir` (string, requerido): path al folder raíz con subfolders de clases.
+
+* `--output_dir` (string, requerido): path donde se escriben artefactos.
+
+### **2.2 Control de modelo**
+
+* `--teacher_arch` (string): `efficientnet_b3` o `resnet101`. Default: `efficientnet_b3`.
+
+* `--student_arch` (string): fijo `efficientnet_lite1`. Default: `efficientnet_lite1`.
+
+* `--num_classes` (int, opcional): si no se da, se infiere de carpetas.
+
+* `--student_img_size` (int): default `240`.
+
+* `--teacher_img_size` (int): default `auto` (ver regla abajo).
+
+**Regla `teacher_img_size=auto`:**
+
+* si `teacher_arch=efficientnet_b3` ⇒ `teacher_img_size=300`
+
+* si `teacher_arch=resnet101` ⇒ `teacher_img_size=224`
+
+* permitir override explícito.
+
+### **2.3 Dataset y entrenamiento**
+
+* `--seed` (int) default `42`
+
+* `--train_frac` default `0.8`
+
+* `--val_frac` default `0.1`
+
+* `--test_frac` default `0.1`
+
+* `--batch_size` default `32`
+
+* `--epochs_teacher` default `10`
+
+* `--epochs_student` default `20`
+
+* `--epochs_qat` default `10`
+
+* `--lr_teacher` default `1e-3`
+
+* `--lr_student` default `1e-3`
+
+* `--lr_qat` default `1e-4`
+
+* `--weight_decay` default `0.0` (o usar AdamW si se desea, pero debe quedar fijo y registrado)
+
+* `--use_class_weights` default `true`
+
+### **2.4 Destilación (maestro‑alumno)**
+
+* `--distill_alpha` (float, default `0.5`)  
+   (peso de hard loss; distill loss pesa `1-alpha`)
+
+* `--distill_temperature` (float, default `4.0`)
+
+### **2.5 Cuantización / TFLite**
+
+* `--qat` (bool) default `true`
+
+* `--tflite_inference_input_type` (string) `int8` o `uint8` default `int8`
+
+* `--tflite_inference_output_type` (string) `int8` (default `int8`)
+
+* `--rep_data_num_batches` default `50` (representative dataset)
+
+* `--force_input_range_0_255` default `true` (ver sección 7\)
+
+### **2.6 Umbral “desconocido”**
+
+* `--threshold_target_accept_accuracy` default `0.95`
+
+* `--threshold_min_coverage` default `0.60`
+
+* `--threshold_penalty_incorrect` default `3.0`
+
+### **2.7 Logs**
+
+* `--log_level` default `INFO`
+
+* `--save_tensorboard` default `true`
+
+---
+
+## **3\) Escaneo de dataset y mapeo de clases (obligatorio)**
+
+### **3.1 Reglas de clases y labels**
+
+* Las clases se obtienen de subdirectorios **de primer nivel** dentro de `data_dir`.
+
+* El orden de clases debe ser **alfabético por nombre de folder** (para estabilidad).
+
+* Crear:
+* `labels.txt` con una clase por línea, en ese orden.
+* `dataset_manifest.json` (recomendado) con conteos por clase.
+
+### **3.2 Archivos soportados**
+
+* Aceptar: `.jpg`, `.jpeg`, `.png` (mínimo).
+
+* Si hay imágenes corruptas:
+* Deben **omitirse** con warning (no romper entrenamiento).
+* Registrar en `bad_files.txt` en `output_dir`.
+
+### **3.3 Split reproducible**
+
+Crear `train.csv`, `val.csv`, `test.csv` en `output_dir` con columnas:
+
+* `filepath` (absoluta o relativa a `data_dir`, pero consistente)
+
+* `label_index` (int)
+
+* `label_name` (string)
+
+**Reglas:**
+
+* Split estratificado por clase si es posible (si hay suficientes imágenes).
+
+* Debe sumar exactamente 1.0 (considerar redondeos por clase).
+
+* Guardar `split_seed` y fracciones en `training_config.json`.
+
+---
+
+## **4\) Preprocesamiento EXACTO (equivalente a inferencia)**
+
+**Esta sección es crítica:** el pipeline de entrenamiento debe ser “source of truth” para el preprocesamiento.
+
+### **4.1 Decodificación y canales**
+
+* Decodificar a **RGB** 3 canales.
+
+* Si imagen tiene alpha (PNG RGBA), descartar alpha.
+
+* Si es grayscale, convertir a RGB replicando canal.
+
+### **4.2 Letterbox 240×240 con bilinear y padding negro**
+
+Implementar una función determinista `letterbox_resize_pad(image, target)`:
+
+**Entrada:** tensor `[H,W,3]` uint8 o float32.  
+ **Salida:** tensor `[target,target,3]`.
+
+Algoritmo (exacto):
+
+1. `scale = target / max(H, W)`
+
+2. `new_h = round(H * scale)`  
+    `new_w = round(W * scale)`
+
+3. `resized = resize(image, (new_h, new_w), method=BILINEAR)`
+
+4. `pad_top = floor((target - new_h)/2)`
+
+5. `pad_bottom = target - new_h - pad_top`
+
+6. `pad_left = floor((target - new_w)/2)`
+
+7. `pad_right = target - new_w - pad_left`
+
+8. `padded = pad(resized, [[pad_top,pad_bottom],[pad_left,pad_right],[0,0]], constant_values=0)`
+
+9. Asegurar forma final exacta `[target,target,3]`.
+
+**Notas obligatorias:**
+
+* Padding negro: R=0, G=0, B=0.
+
+* No estirar para forzar 1:1 sin padding.
+
+* Bilinear, no nearest.
+
+### **4.3 Rango de valores para entrenamiento**
+
+Para facilitar una entrada eficiente en C, el contenedor debe entrenar con imágenes en **rango 0..255** (float32) *sin normalizar a 0..1* y colocar cualquier normalización necesaria **dentro del modelo** (si se usa). Esto permite controlar mejor la cuantización y, si se fuerza el rango, conseguir un mapeo simple.
+
+**Regla recomendada (para robustez):**
+
+* Dataset entrega `float32` en `[0,255]`.
+
+* Si el backbone requiere otro rango, agregar una capa inicial explícita:
+* `x = x / 255.0` o `x = (x - 127.5)/127.5`, etc.
+
+* Registrar esa decisión en `model_metadata.json`.
+
+---
+
+## **5\) Arquitecturas: maestro y alumno (obligatorio)**
+
+### **5.1 Maestro (solo entrenamiento)**
+
+Implementar `trainer/models/teacher.py` con:
+
+* `teacher_arch ∈ {efficientnet_b3, resnet101}`.
+
+* Base pre-entrenada (ImageNet) si hay internet disponible; si no, permitir fallback con `--no_pretrained` (opcional).
+
+Head estándar:
+
+* `GlobalAveragePooling2D`
+
+* `Dropout(0.2)`
+
+* `Dense(num_classes)` **sin softmax** (logits)
+
+Entrenamiento recomendado (2 fases):
+
+1. Congelar backbone, entrenar head 2–3 epochs.
+
+2. Descongelar últimas capas (p.ej. último bloque) y fine-tune.
+
+Guardar:
+
+* `teacher_saved_model/` en output\_dir (SavedModel)
+
+* `teacher_metrics.json`
+
+### **5.2 Alumno (deploy)**
+
+Implementar `trainer/models/student.py`:
+
+* Backbone: **EfficientNet‑Lite1** con input **240×240×3**.
+
+* Head:
+* `GlobalAveragePooling2D`
+* `Dropout(0.2)`
+* `Dense(num_classes)` logits
+
+**Requisito:** el alumno debe ser el único que se exporta a TFLite.
+
+Si EfficientNet‑Lite1 se implementa vía TF Hub, usar una variante “feature vector” (sin top) y construir head propio. Si se implementa de otra forma, debe mantenerse el tamaño 240 y la capacidad similar.
+
+Guardar:
+
+* `student_fp32_saved_model/` (previo a QAT)
+
+* `student_fp32_metrics.json`
+
+---
+
+## **6\) Destilación maestro‑alumno (obligatoria)**
+
+Implementar `trainer/models/distiller.py` como modelo `Distiller(tf.keras.Model)` con:
+
+### **6.1 Pérdidas**
+
+* **Hard loss:** `SparseCategoricalCrossentropy(from_logits=True)`
+
+* **Distill loss:** KL divergence entre distribuciones suaves:
+
+Definiciones:
+
+* `T = distill_temperature`
+
+* `p_t = softmax(teacher_logits / T)`
+
+* `p_s = softmax(student_logits / T)`
+
+* `L_distill = KL(p_t || p_s) * (T*T)` (factor estándar)
+
+Pérdida total:
+
+* `L_total = alpha * L_hard + (1 - alpha) * L_distill`
+
+### **6.2 Entrenamiento**
+
+* Teacher en modo `training=False` siempre (congelado durante distil).
+
+* Entrenar alumno con `L_total`.
+
+**Salida:** un alumno FP32 ya destilado.
+
+Guardar además un `distillation_config.json` con `alpha`, `T`, epochs, lrs.
+
+---
+
+## **7\) QAT: cuantización consciente del entrenamiento (obligatoria)**
+
+Implementar `trainer/quant/qat.py`:
+
+### **7.1 Proceso**
+
+* Tomar el alumno FP32 destilado.
+
+* Aplicar QAT usando `tensorflow_model_optimization`:
+* `quantize_model(student_fp32)` (si es compatible)
+* o annotate/apply para control fino.
+
+### **7.2 Fine-tuning QAT**
+
+* Entrenar `epochs_qat` con `lr_qat` bajo.
+
+* **Recomendación fuerte:** mantener también distil loss durante QAT (teacher fijo) para conservar precisión.
+* Si el agente detecta incompatibilidades con QAT \+ distiller, permitir fallback:
+  * QAT fine‑tune SOLO con hard loss, pero registrarlo en `calibration_notes` y `training_config.json`.
+
+Guardar:
+
+* `student_qat_saved_model/`
+
+---
+
+## **8\) Exportación TFLite full‑integer (obligatoria)**
+
+Implementar `trainer/quant/tflite_export.py`:
+
+### **8.1 Representative dataset**
+
+Implementar `trainer/quant/rep_dataset.py` generador:
+
+* Debe tomar batches del **train set** (o subset) ya preprocesado a 240×240.
+
+* Debe devolver batches `float32` exactamente con el mismo preprocesamiento que el modelo recibe (antes de cuantización).
+
+**Regla para mejorar compatibilidad con C (`--force_input_range_0_255=true`):**
+
+* Incluir al inicio del representative dataset **dos ejemplos sintéticos**:
+* una imagen completa en 0
+* una imagen completa en 255  
+     Esto ayuda a que la cuantización de entrada cubra el rango completo y tienda a producir un mapeo simple.
+
+### **8.2 Converter settings (full int8)**
+
+Configurar:
+
+* `optimizations = [Optimize.DEFAULT]`
+
+* `representative_dataset = ...`
+
+* `target_spec.supported_ops = [TFLITE_BUILTINS_INT8]`
+
+* `inference_input_type` según `--tflite_inference_input_type` (`int8` o `uint8`)
+
+* `inference_output_type = int8`
+
+**Validación obligatoria post‑export:**
+
+* Cargar con `tf.lite.Interpreter` y verificar:
+* input dtype ∈ {int8, uint8}
+* output dtype \== int8
+* no hay ops float (si aparece float, fallar el pipeline y reportar por qué)
+
+Guardar como:
+
+* `output_dir/model_qat_int8.tflite`
+
+---
+
+## **9\) Evaluación y artefactos (obligatorio)**
+
+Implementar `trainer/eval/tflite_runner.py`, `metrics.py`, `confusion_matrix.py`.
+
+### **9.1 Evaluación usando el TFLite final (no Keras)**
+
+Regla: **todas las métricas finales y threshold se calculan con `model_qat_int8.tflite`.**
+
+Pasos:
+
+1. Cargar interpreter.
+
+2. Leer input quant params: `scale_in`, `zero_in`, `dtype_in`.
+
+3. Para cada imagen test/val:
+ * aplicar letterbox 240×240
+ * obtener tensor float32 en \[0..255\] (o lo que corresponda por tu pipeline)
+ * cuantizar a dtype\_in con:
+   * `q = round(x / scale_in + zero_in)` y clamp al rango del dtype
+
+4. Ejecutar `invoke()`.
+
+5. Leer output cuantizado int8, dequantizar:
+ * `logits = (q_out - zero_out) * scale_out`
+
+6. Aplicar `softmax(logits)` en CPU (Python) para probabilidades.
+
+7. Calcular métricas.
+
+### **9.2 Matriz de confusión**
+
+* Calcular predicción argmax (sin threshold) vs etiqueta real.
+
+* Guardar:
+* `confusion_matrix.csv`
+* `confusion_matrix.png` (matplotlib, ejes con nombres de clase)
+
+### **9.3 Métricas mínimas a guardar**
+
+En `metrics.json`:
+
+* accuracy\_top1
+
+* macro\_f1
+
+* per\_class\_precision/recall/f1
+
+* num\_test\_samples
+
+* num\_classes
+
+---
+
+## **10\) Recomendación de umbral de confianza (obligatorio)**
+
+Implementar `trainer/eval/threshold.py`:
+
+### **10.1 Definiciones**
+
+Para cada muestra `i` del **validation set** (no test):
+
+* `pmax_i = max(probs_i)`
+
+* `correct_i = (argmax(probs_i) == y_i)`
+
+Para un umbral `t`:
+
+* `accepted_i = (pmax_i >= t)`
+
+* `coverage(t) = mean(accepted)`
+
+* `accept_accuracy(t) = mean(correct | accepted)` (si coverage\>0; si no, 0\)
+
+### **10.2 Selección del umbral (algoritmo exacto)**
+
+Evaluar `t` en un grid denso, p.ej. `t ∈ {0.00, 0.01, ..., 0.99}`.
+
+1. Conjunto factible:
+
+* `accept_accuracy(t) >= threshold_target_accept_accuracy`
+
+* `coverage(t) >= threshold_min_coverage`
+
+Si existe al menos un `t` factible:
+
+* escoger el `t` con **máxima coverage**.
+
+* si empate, escoger el **menor t** (más permisivo).
+
+2. Si NO existe factible:
+
+* maximizar una utilidad que penaliza errores aceptados:
+* `correct_accepted_rate(t) = mean(correct & accepted)`
+* `incorrect_accepted_rate(t) = mean((~correct) & accepted)`
+* `utility(t) = correct_accepted_rate(t) - penalty * incorrect_accepted_rate(t)`
+* `penalty = threshold_penalty_incorrect` (default 3.0)
+
+* escoger `t` que maximiza `utility(t)`, empate ⇒ menor `t`.
+
+### **10.3 Archivo `threshold_recommendation.json`**
+
+Guardar al menos:
+
+`{`  
+  `"recommended_threshold": 0.75,`  
+  `"calibration_notes": "Seleccionado en validation: criterio coverage máximo sujeto a accept_accuracy>=0.95 y coverage>=0.60. Si no se cumplió, se usó utilidad con penalización 3.0.",`  
+  `"target_accept_accuracy": 0.95,`  
+  `"min_coverage": 0.60,`  
+  `"achieved_accept_accuracy": 0.96,`  
+  `"achieved_coverage": 0.63,`  
+  `"selection_method": "constraint_then_utility",`  
+  `"grid_step": 0.01`  
+`}`
+
+**Recomendado adicional:**
+
+* `threshold_curve.csv` con columnas `t,coverage,accept_accuracy,utility`
+
+* `reliability_diagram.png` (calibración visual)
+
+---
+
+## **11\) `model_metadata.json` (obligatorio)**
+
+Generar un JSON que el equipo móvil pueda leer sin adivinar nada.
+
+Debe incluir, como mínimo:
+
+`{`  
+  `"model_file": "model_qat_int8.tflite",`  
+  `"labels_file": "labels.txt",`  
+  `"input": {`  
+    `"width": 240,`  
+    `"height": 240,`  
+    `"channels": 3,`  
+    `"color_space": "RGB",`  
+    `"dtype": "int8",`  
+    `"quantization": { "scale": 1.0, "zero_point": -128 }`  
+  `},`  
+  `"preprocess": {`  
+    `"letterbox": true,`  
+    `"keep_aspect_ratio": true,`  
+    `"pad_color_rgb": [0,0,0],`  
+    `"interpolation": "bilinear",`  
+    `"resize_rule": "scale = target/max(h,w); new=round(h*scale,w*scale); pad centered"`  
+  `},`  
+  `"output": {`  
+    `"dtype": "int8",`  
+    `"quantization": { "scale": 0.02, "zero_point": -3 },`  
+    `"is_logits": true,`  
+    `"softmax_in_model": false`  
+  `}`  
+`}`
+
+**Regla:** `scale` y `zero_point` se deben extraer del propio `.tflite` tras exportarlo (no “inventarlos”).
+
+---
+
+## **12\) Docker (obligatorio)**
+
+### **12.1 Dockerfile**
+
+* Base: `python:3.10-slim` (o similar).
+
+* Instalar deps del sistema para imágenes (p.ej. `libjpeg`, `zlib`, etc).
+
+* Instalar `requirements.txt`.
+
+* Copiar el código.
+
+* Definir `ENTRYPOINT ["python","-m","trainer.cli"]`.
+
+### **12.2 requirements.txt (mínimo)**
+
+* `tensorflow` (CPU)
+
+* `tensorflow-model-optimization`
+
+* `tensorflow-hub` (si se usa para EfficientNet‑Lite1)
+
+* `numpy`, `pandas`
+
+* `scikit-learn`
+
+* `matplotlib`
+
+* `tqdm`
+
+### **12.3 Script de ejecución**
+
+`scripts/run_in_docker.sh` debe:
+
+* construir la imagen
+
+* ejecutar:
+* mount `data_dir` como `/data`
+* mount `output_dir` como `/out`
+* llamar CLI con paths `/data` y `/out`
+
+Ejemplo:
+
+`docker run --rm \`  
+  `-v "$DATA_DIR":/data \`  
+  `-v "$OUT_DIR":/out \`  
+  `image_recognition_training:latest \`  
+  `--data_dir /data --output_dir /out --teacher_arch efficientnet_b3`
+
+---
+
+## **13\) Reproducibilidad y trazabilidad (obligatorio)**
+
+Generar en `output_dir`:
+
+* `training_config.json` (todos los args finales \+ defaults resueltos)
+
+* `run_metadata.json` con:
+* timestamp UTC
+* versión Python
+* versión TensorFlow
+* lista `pip freeze` (o hash)
+* semilla
+* conteos de dataset
+* tiempo total de entrenamiento
+
+---
+
+## **14\) Pruebas mínimas (obligatorias)**
+
+### **14.1 Smoke test automatizado**
+
+`scripts/smoke_test.sh` debe:
+
+* crear un dataset sintético pequeño (2 clases, 10 imágenes por clase) dentro del contenedor o como fixture
+
+* correr el pipeline con epochs pequeñas (1/1/1)
+
+* validar que existen:
+* `model_qat_int8.tflite`
+* `labels.txt`
+* `confusion_matrix.png`
+* `threshold_recommendation.json`
+* `model_metadata.json`
+
+* validar que:
+* el tflite input dtype es int8 o uint8
+* output dtype es int8
+
+### **14.2 “Contrato” de preprocesamiento**
+
+Agregar `trainer/data/preprocess.py` con una función pública:
+
+* `preprocess_image_bytes_to_letterbox_rgb(image_bytes, target=240) -> uint8[240,240,3]`
+
+Esto luego servirá para comparar contra la implementación en C.
+
+---
+
+## **15\) Checklist de aceptación del contenedor (lo que el agente debe cumplir)**
+
+1. Con **solo** `--data_dir` y `--output_dir`, el pipeline corre end‑to‑end y produce todos los artefactos requeridos.
+
+2. `model_qat_int8.tflite` es **full integer** (input int8/uint8, ops int8, output int8).
+
+3. `labels.txt` está ordenado por nombre de carpeta y coincide con el modelo.
+
+4. El preprocesamiento está **definido inequívocamente** (letterbox \+ bilinear \+ padding negro).
+
+5. `threshold_recommendation.json` tiene `recommended_threshold` ∈ \[0,1\] y notas claras del método.
+
+6. `model_metadata.json` expone dtype y quant params reales extraídos del TFLite.
+

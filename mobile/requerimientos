@@ -1,0 +1,674 @@
+# **Entregable final del módulo móvil**
+
+Crear un repositorio `image_recognition/` (plugin Flutter) con:
+
+* **Biblioteca nativa “image\_recognition”** (compilada):
+
+  * Android: `libimage_recognition.so` \+ `libtensorflowlite_c.so` por ABI.
+
+  * iOS: `libimage_recognition.a` \+ `TensorFlowLiteC.framework` (universal).
+
+* **Plugin Flutter** `image_recognition`:
+
+  * API Dart estable `ImageRecognition.analyze(...)` y `analyzeRgba(...)`.
+
+  * Puente Dart ↔ C por `dart:ffi`.
+
+  * Ejecución en **worker isolate** (no bloquea UI).
+
+* **Example app**:
+
+  * Galería \+ cámara \+ preview \+ análisis \+ tiempos \+ errores.
+
+---
+
+# **2\) Estructura exacta del plugin (obligatoria)**
+
+`image_recognition/`  
+  `pubspec.yaml`  
+  `README.md`  
+  `ffigen.yaml`
+
+  `lib/`  
+    `image_recognition.dart`  
+    `src/`  
+      `asset_extractor.dart`  
+      `engine_isolate.dart`  
+      `errors.dart`  
+      `native_loader.dart`  
+      `result.dart`  
+      `bindings.g.dart        # generado por ffigen (NO editar manual)`
+
+  `android/`  
+    `build.gradle`  
+    `src/main/`  
+      `jniLibs/`  
+        `arm64-v8a/`  
+          `libimage_recognition.so`  
+          `libtensorflowlite_c.so`  
+        `armeabi-v7a/`  
+          `libimage_recognition.so`  
+          `libtensorflowlite_c.so`  
+        `x86/`  
+          `libimage_recognition.so`  
+          `libtensorflowlite_c.so`  
+        `x86_64/`  
+          `libimage_recognition.so`  
+          `libtensorflowlite_c.so`
+
+  `ios/`  
+    `image_recognition.podspec`  
+    `libs/`  
+      `libimage_recognition.a`  
+    `Frameworks/`  
+      `TensorFlowLiteC.framework`
+
+  `native/`  
+    `include/`  
+      `image_recognition.h`  
+    `src/`  
+      `image_recognition.cpp`  
+      `image_decode_stb.cpp`  
+      `image_preprocess.cpp`  
+      `softmax.cpp`  
+      `config_parse.cpp`  
+      `file_io.cpp`  
+      `timing.cpp`  
+    `third_party/`  
+      `stb_image.h`  
+      `stb_image_resize2.h`  
+      `cJSON.c`  
+      `cJSON.h`  
+    `CMakeLists.txt`  
+    `build/`  
+      `build_android_all.sh`  
+      `build_ios_all.sh`
+
+  `example/`  
+    `pubspec.yaml`  
+    `lib/main.dart`
+
+---
+
+# **3\) Motor nativo (C ABI) — especificación exacta**
+
+## **3.1 Header público (OBLIGATORIO)**
+
+Archivo: `native/include/image_recognition.h`
+
+**Debe compilar como C** (y ser usable desde C), aunque la implementación sea C++.
+
+`#pragma once`  
+`#include <stdint.h>`
+
+`#ifdef __cplusplus`  
+`extern "C" {`  
+`#endif`
+
+`#define IMAGE_REC_LABEL_MAX   128`  
+`#define IMAGE_REC_ERRMSG_MAX  256`
+
+`typedef enum image_rec_error {`  
+  `IMAGE_REC_OK = 0,`  
+  `IMAGE_REC_ERR_NOT_INITIALIZED = 1,`  
+  `IMAGE_REC_ERR_INVALID_ARGUMENT = 2,`  
+  `IMAGE_REC_ERR_DECODE_FAILED = 3,`  
+  `IMAGE_REC_ERR_MODEL_LOAD_FAILED = 4,`  
+  `IMAGE_REC_ERR_TFLITE_ALLOC_FAILED = 5,`  
+  `IMAGE_REC_ERR_INVOKE_FAILED = 6,`  
+  `IMAGE_REC_ERR_IO = 7,`  
+  `IMAGE_REC_ERR_OUT_OF_MEMORY = 8,`  
+  `IMAGE_REC_ERR_INTERNAL = 100`  
+`} image_rec_error;`
+
+`typedef struct imageRecResult {`  
+  `int32_t error_code;                  // IMAGE_REC_OK si todo bien`  
+  `int32_t class_index;                 // >=0 ganador, -1 si "desconocido" o error`  
+  `int32_t confidence;                  // 0..100 (entero)`  
+  `float   confidence_f;                // 0..1`  
+  `float   applied_threshold;           // threshold usado`  
+  `int32_t is_unknown;                  // 1 si confidence_f < threshold`  
+  `char    label[IMAGE_REC_LABEL_MAX];  // UTF-8, null-terminated`  
+  `char    error_message[IMAGE_REC_ERRMSG_MAX];`
+
+  `// tiempos (ms)`  
+  `uint32_t time_decode_ms;`  
+  `uint32_t time_preprocess_ms;`  
+  `uint32_t time_infer_ms;`  
+  `uint32_t time_post_ms;`  
+  `uint32_t time_total_ms;`  
+`} imageRecResult;`
+
+`// Inicializa motor. model_path: .tflite en filesystem.`  
+`// config_path: JSON con labels + threshold (ver 3.4).`  
+`int32_t image_rec_init(const char* model_path, const char* config_path);`
+
+`// Analiza imagen en bytes comprimidos (JPG/PNG).`  
+`int32_t image_rec_analyze_image_bytes(const uint8_t* bytes, int32_t length, imageRecResult* out_result);`
+
+`// Camino rápido: RGBA ya decodificado (cámara).`  
+`int32_t image_rec_analyze_pixels_rgba(const uint8_t* rgba, int32_t width, int32_t height, imageRecResult* out_result);`
+
+`// Ajusta threads (antes de init o reiniciando internamente).`  
+`int32_t image_rec_set_num_threads(int32_t num_threads);`
+
+`// Limpieza total.`  
+`void image_rec_shutdown(void);`
+
+`#ifdef __cplusplus`  
+`}`  
+`#endif`
+
+**Reglas obligatorias:**
+
+* `out_result` lo asigna Dart (C **no** debe devolver punteros que Dart deba liberar).
+
+* Strings siempre en buffers fijos y terminados en `\0`.
+
+* La librería debe ser **reentrante solo si** el plugin serializa llamadas (ver isolate); por defecto, asumir **no thread-safe** y proteger con mutex interno.
+
+---
+
+## **3.2 Runtime TFLite (OBLIGATORIO)**
+
+Usar **TensorFlow Lite C API** (`tensorflow/lite/c/c_api.h`). La C API se documenta como el API de inferencia equivalente a un subconjunto del `Interpreter` C++ [Android Go Source](https://android.googlesource.com/platform/external/tensorflow/%2B/a444526fa7a096ead6096b7e36c8da4371d6380b/tensorflow/lite/c/).
+
+### **Inicialización (image\_rec\_init)**
+
+1. Cargar modelo:
+
+   * `TfLiteModelCreateFromFile(model_path)`
+
+2. Crear options:
+
+   * `TfLiteInterpreterOptionsCreate()`
+
+   * `TfLiteInterpreterOptionsSetNumThreads(options, num_threads)`
+
+3. Habilitar XNNPACK con delegate (OBLIGATORIO):
+
+   * Crear delegate `TfLiteXNNPackDelegateCreate(&opts)` usando `TfLiteXNNPackDelegateOptionsDefault()` y setear `opts.num_threads = num_threads` [Android Go Source](https://android.googlesource.com/platform/external/tensorflow/%2B/refs/heads/android-s-beta-5/tensorflow/lite/delegates/xnnpack/README.md)
+
+   * Agregar delegate a options.
+
+4. Crear interpreter:
+
+   * `TfLiteInterpreterCreate(model, options)`
+
+5. `TfLiteInterpreterAllocateTensors(interpreter)`
+
+6. Capturar metadatos:
+
+   * input tensor: dtype (int8 o uint8), dims (debe ser 240×240×3 con batch opcional), `scale` y `zero_point`.
+
+   * output tensor: dtype int8, dims `[1, num_classes]`, quant params.
+
+7. Guardar todo en un `EngineState` global.
+
+Nota: Para que XNNPACK acelere **cuantizados int8**, la librería TFLite debe compilarse con `--define xnn_enable_qs8=true` [Android Go Source](https://android.googlesource.com/platform/external/tensorflow/%2B/refs/heads/android-s-beta-5/tensorflow/lite/delegates/xnnpack/README.md).
+
+---
+
+## **3.3 Preprocesamiento EXACTO (obligatorio)**
+
+Esto debe coincidir con lo definido:
+
+**Entrada**: imagen RGB (0..255).  
+ **Salida**: tensor 240×240×3 con **letterbox** y **bilinear**.
+
+### **Algoritmo exacto de letterbox (idéntico al entrenamiento)**
+
+Para una imagen `W×H`:
+
+1. `scale = 240 / max(W, H)`
+
+2. `new_w = round(W * scale)`
+
+3. `new_h = round(H * scale)`
+
+4. Redimensionar a `(new_w, new_h)` con **bilinear**.
+
+5. Crear buffer destino 240×240×3 inicializado en **0** (negro).
+
+6. Padding centrado:
+
+   * `pad_left = floor((240 - new_w)/2)`
+
+   * `pad_top = floor((240 - new_h)/2)`
+
+7. Copiar la imagen redimensionada al buffer destino en `[pad_top : pad_top+new_h, pad_left : pad_left+new_w]`.
+
+### **Implementación**
+
+* Decodificación JPG/PNG: `stb_image.h` (stbi\_load\_from\_memory a 3 canales).
+
+* Resize bilinear: `stb_image_resize2.h` (`stbir_resize_uint8`).
+
+**Prohibido:**
+
+* nearest-neighbor.
+
+* estirar sin conservar proporción.
+
+---
+
+## **3.4 Cuantización de entrada (obligatoria, basada en el modelo)**
+
+Convertir del buffer final (uint8 0..255) al dtype del input tensor:
+
+* Leer del input tensor: `scale_in`, `zero_in`, `dtype_in`.
+
+* Para cada valor `x` (0..255):
+
+  * `q = round(x / scale_in + zero_in)`
+
+  * clamp al rango de `int8` (-128..127) o `uint8` (0..255).
+
+* Escribir en el buffer del input tensor.
+
+**Optimización obligatoria**:
+
+* Si `dtype_in=int8`, `scale_in==1.0` y `zero_in==-128`, usar ruta rápida:
+
+  * `q = (int8_t)(x - 128)`
+
+---
+
+## **3.5 Inferencia \+ salida (obligatorio)**
+
+1. `TfLiteInterpreterInvoke(interpreter)`
+
+2. Leer output tensor (int8).
+
+3. Dequantizar logits:
+
+   * `logit = (q - zero_out) * scale_out`
+
+4. Softmax estable en CPU:
+
+   * `m = max(logits)`
+
+   * `p_i = exp(logit_i - m) / sum(exp(logit_j - m))`
+
+5. `argmax`:
+
+   * `best_index`
+
+   * `best_prob`
+
+6. Umbral:
+
+   * `threshold = recommended_threshold` (del JSON)
+
+   * si `best_prob < threshold` ⇒ `is_unknown=1`, `class_index=-1`, `label="desconocido"` (configurable), `confidence` \= round(best\_prob\*100)
+
+---
+
+## **3.6 Config JSON (obligatorio)**
+
+`config_path` apunta a JSON con:
+
+`{`  
+  `"labels_path": "labels.txt",`  
+  `"threshold_path": "threshold_recommendation.json",`  
+  `"unknown_label": "desconocido",`  
+  `"num_threads": 2`  
+`}`
+
+**Reglas:**
+
+* Si `labels_path` o `threshold_path` son relativos, resolverlos **relativos al directorio del config**.
+
+* `labels.txt`: una clase por línea, orden exacto del entrenamiento.
+
+* `threshold_recommendation.json`: leer `recommended_threshold`.
+
+---
+
+# **4\) Compilación de dependencias TFLite (Android \+ iOS)**
+
+## **4.1 Android: construir `libtensorflowlite_c.so` por ABI (obligatorio)**
+
+Basado en el README de TFLite C API (target `//tensorflow/lite/c:tensorflowlite_c`) [Android Go Source](https://android.googlesource.com/platform/external/tensorflow/%2B/a444526fa7a096ead6096b7e36c8da4371d6380b/tensorflow/lite/c/) y habilitar XNNPACK \+ quant int8 (qs8) [Android Go Source](https://android.googlesource.com/platform/external/tensorflow/%2B/refs/heads/android-s-beta-5/tensorflow/lite/delegates/xnnpack/README.md):
+
+En `native/build/build_android_all.sh`:
+
+1. Clonar TensorFlow (misma versión/tag que tu entrenamiento).
+
+2. Configurar NDK/SDK/Bazel.
+
+3. Para cada ABI:
+
+**arm64-v8a**:
+
+ `bazel build -c opt --config=android_arm64 \`  
+  `--define tflite_with_xnnpack=true \`  
+  `--define xnn_enable_qs8=true \`  
+  `//tensorflow/lite/c:tensorflowlite_c`
+
+* 
+
+**armeabi-v7a**:
+
+ `bazel build -c opt --config=android_arm \`  
+  `--define tflite_with_xnnpack=true \`  
+  `--define xnn_enable_qs8=true \`  
+  `//tensorflow/lite/c:tensorflowlite_c`
+
+* 
+
+**x86**:
+
+ `bazel build -c opt --config=android_x86 \`  
+  `--define tflite_with_xnnpack=true \`  
+  `--define xnn_enable_qs8=true \`  
+  `//tensorflow/lite/c:tensorflowlite_c`
+
+* 
+
+**x86\_64**:
+
+ `bazel build -c opt --config=android_x86_64 \`  
+  `--define tflite_with_xnnpack=true \`  
+  `--define xnn_enable_qs8=true \`  
+  `//tensorflow/lite/c:tensorflowlite_c`
+
+*   
+4. Copiar el `.so` resultante de `bazel-bin/tensorflow/lite/c/` a:  
+    `android/src/main/jniLibs/<abi>/libtensorflowlite_c.so`
+
+---
+
+## **4.2 iOS: construir `TensorFlowLiteC.framework` (obligatorio)**
+
+Usar Bazel para generar `TensorFlowLiteC_framework.zip` y obtener el framework (doc oficial) [Google AI for Developers](https://ai.google.dev/edge/litert/build/ios?utm_source=chatgpt.com):
+
+`bazel build --config=ios_fat -c opt --cxxopt=--std=c++17 \`  
+  `//tensorflow/lite/ios:TensorFlowLiteC_framework`
+
+* El zip se genera bajo `bazel-bin/tensorflow/lite/ios/` [Google AI for Developers](https://ai.google.dev/edge/litert/build/ios?utm_source=chatgpt.com).
+
+* Descomprimir y copiar `TensorFlowLiteC.framework` a:
+
+  * `ios/Frameworks/TensorFlowLiteC.framework`
+
+---
+
+# **5\) Compilar el motor `libimage_recognition` (Android \+ iOS)**
+
+## **5.1 Android (.so)**
+
+Compilar `libimage_recognition.so` con NDK, enlazando dinámicamente contra `libtensorflowlite_c.so` (ya en jniLibs).  
+ En `native/CMakeLists.txt`:
+
+* `add_library(image_recognition SHARED ...)`
+
+* `target_include_directories(...)` para:
+
+  * `native/include`
+
+  * headers de TFLite C (copiados al repo bajo `native/third_party/tflite_headers/...`)
+
+* `target_link_libraries(image_recognition log android)`
+
+Importante: el loader de Android encontrará `libtensorflowlite_c.so` automáticamente al estar en el mismo folder ABI.
+
+Copiar `libimage_recognition.so` a:  
+ `android/src/main/jniLibs/<abi>/libimage_recognition.so`
+
+---
+
+## **5.2 iOS (.a)**
+
+Construir `libimage_recognition.a` (fat) con `xcodebuild` o clang \+ lipo:
+
+* archs mínimos: `arm64` (device) y `x86_64` (simulator).
+
+Copiar a `ios/libs/libimage_recognition.a`.
+
+---
+
+# **6\) Integración iOS en el plugin (podspec) — obligatorio**
+
+Archivo: `ios/image_recognition.podspec`
+
+* `s.platform = :ios, '12.0'`
+
+* `s.vendored_libraries = 'ios/libs/libimage_recognition.a'`
+
+* `s.vendored_frameworks = 'ios/Frameworks/TensorFlowLiteC.framework'`
+
+**Para evitar que el linker “strippee” símbolos usados por FFI**, forzar carga:
+
+* `s.pod_target_xcconfig = { 'OTHER_LDFLAGS' => '-Wl,-force_load,${PODS_TARGET_SRCROOT}/ios/libs/libimage_recognition.a' }`
+
+Flutter en iOS carga símbolos de librería estática con `DynamicLibrary.process()` (guía oficial de interop C en Flutter) [Flutter Docs](https://docs.flutter.dev/platform-integration/ios/c-interop?utm_source=chatgpt.com).
+
+---
+
+# **7\) Plugin Flutter (FFI) — implementación exacta**
+
+## **7.1 pubspec.yaml (plugin)**
+
+Dependencias:
+
+* `ffi`
+
+* `ffigen`
+
+* `path_provider`
+
+* `path`
+
+* `flutter` SDK
+
+## **7.2 ffigen (obligatorio)**
+
+Archivo `ffigen.yaml` debe generar `lib/src/bindings.g.dart` desde `native/include/image_recognition.h`.
+
+Regla: **no escribir bindings a mano**.
+
+## **7.3 Loader nativo**
+
+Archivo `lib/src/native_loader.dart`:
+
+* Android: `DynamicLibrary.open('libimage_recognition.so')`
+
+* iOS: `DynamicLibrary.process()` [Flutter Docs](https://docs.flutter.dev/platform-integration/ios/c-interop?utm_source=chatgpt.com)
+
+## **7.4 Ejecución en isolate (obligatoria)**
+
+Archivo `lib/src/engine_isolate.dart`:
+
+* Crear un isolate persistente.
+
+* En el isolate:
+
+  1. abrir librería
+
+  2. llamar `image_rec_init(modelPath, configPath)`
+
+  3. escuchar requests de análisis
+
+  4. por cada request:
+
+     * copiar bytes a memoria nativa (`malloc`)
+
+     * reservar `imageRecResult` (`calloc`)
+
+     * llamar analyze
+
+     * convertir struct a Map/JSON
+
+     * liberar malloc/calloc
+
+     * responder
+
+**Transferencia eficiente de bytes:**
+
+* usar `TransferableTypedData` para pasar `Uint8List` al isolate sin copias innecesarias.
+
+## **7.5 Extracción de assets a filesystem (obligatorio)**
+
+Archivo `lib/src/asset_extractor.dart`:
+
+* Cargar de `rootBundle`:
+
+  * `assets/image_recognition/model_qat_int8.tflite`
+
+  * `assets/image_recognition/labels.txt`
+
+  * `assets/image_recognition/threshold_recommendation.json`
+
+  * `assets/image_recognition/runtime_config.json`
+
+* Copiar a `getApplicationSupportDirectory()/image_recognition/`
+
+* Retornar paths absolutos para `init`.
+
+## **7.6 API pública (obligatoria)**
+
+Archivo `lib/image_recognition.dart`:
+
+Exponer:
+
+`class ImageRecognition {`  
+  `Future<void> initialize(); // extrae assets e init en isolate`  
+  `Future<ImageRecognitionResult> analyze(Uint8List imageBytes);`  
+  `Future<ImageRecognitionResult> analyzeRgba(Uint8List rgba, int width, int height);`  
+  `Future<void> dispose();`  
+`}`
+
+---
+
+# **8\) Modelo de respuesta Dart (obligatorio y extensible)**
+
+Archivo `lib/src/result.dart`:
+
+`class ImageRecognitionResult {`  
+  `final String imageClass;        // texto o "desconocido"`  
+  `final int classConfidence;      // 0..100`
+
+  `// error`  
+  `final int errorCode;`  
+  `final String? errorMessage;`
+
+  `// extras (pendiente crecimiento)`  
+  `final bool isUnknown;`  
+  `final double confidence01;`  
+  `final double appliedThreshold;`
+
+  `// tiempos`  
+  `final int timeDecodeMs;`  
+  `final int timePreprocessMs;`  
+  `final int timeInferMs;`  
+  `final int timePostMs;`  
+  `final int timeTotalMs;`
+
+  `// TODO: bbox/detección espacial`  
+  `// TODO: metadata/versiones/model hash`
+
+  `Map<String, dynamic> toJson() => ...;`  
+  `factory ImageRecognitionResult.fromJson(Map<String, dynamic> json) => ...;`  
+`}`
+
+---
+
+# **9\) Example app (obligatoria)**
+
+En `example/`:
+
+## **UI mínima**
+
+* Botón “Galería”
+
+* Botón “Cámara”
+
+* Preview (Image.memory)
+
+* Botón “Analizar”
+
+* Spinner mientras analiza
+
+* Mostrar:
+
+  * clase
+
+  * confianza
+
+  * tiempos
+
+  * error legible si falla
+
+## **Requisitos**
+
+* Usar `image_picker` para cámara/galería.
+
+* Convertir a `Uint8List`.
+
+* Llamar `await engine.analyze(bytes)`.
+
+* Medir también con `Stopwatch` en Dart (para comparar con tiempos del motor).
+
+---
+
+# **10\) Configuración por plataforma (obligatoria)**
+
+## **10.1 Android**
+
+* minSdk 21\.
+
+* En `android/build.gradle`:
+
+  * `minSdkVersion 21`
+
+  * `ndk { abiFilters 'armeabi-v7a','arm64-v8a','x86','x86_64' }`
+
+* Incluir comentarios claros:
+
+  * dónde van `libimage_recognition.so` y `libtensorflowlite_c.so`.
+
+## **10.2 iOS**
+
+* min iOS 12\.
+
+* Podspec con vendored libs/frameworks \+ `force_load` (ver sección 6).
+
+---
+
+# **11\) Checklist de aceptación del módulo móvil**
+
+1. **Preprocesamiento exacto**: letterbox 240×240, bilinear, padding negro.
+
+2. Funciona con:
+
+   * bytes JPG/PNG
+
+   * RGBA (cámara)
+
+3. No bloquea UI (worker isolate).
+
+4. Sin fugas:
+
+   * repetir 500 inferencias seguidas no incrementa memoria sostenidamente.
+
+5. “Desconocido”:
+
+   * aplica `recommended_threshold` del JSON y devuelve `isUnknown=true`.
+
+6. Android/iOS cargan librería y hacen inferencia offline.
+
+7. Example app demuestra tiempos y errores.
+
+---
+
+## **Notas importantes (para que no falle en rendimiento)**
+
+* XNNPACK int8 requiere build flags (qs8) [Android Go Source](https://android.googlesource.com/platform/external/tensorflow/%2B/refs/heads/android-s-beta-5/tensorflow/lite/delegates/xnnpack/README.md).
+
+* El target oficial del C API para build es `//tensorflow/lite/c:tensorflowlite_c` [Android Go Source](https://android.googlesource.com/platform/external/tensorflow/%2B/a444526fa7a096ead6096b7e36c8da4371d6380b/tensorflow/lite/c/).
+
+* En iOS, el framework C se construye con el target `//tensorflow/lite/ios:TensorFlowLiteC_framework` [Google AI for Developers](https://ai.google.dev/edge/litert/build/ios?utm_source=chatgpt.com).
+
+* En iOS, FFI con librería estática se resuelve vía `DynamicLibrary.process()` [Flutter Docs](https://docs.flutter.dev/platform-integration/ios/c-interop?utm_source=chatgpt.com).
+

@@ -1,0 +1,20 @@
+# TensorFlow and related packages
+tensorflow==2.15.0
+tensorflow-model-optimization==0.8.0
+tensorflow-hub==0.15.0
+
+# Data processing
+numpy==1.24.3
+pandas==2.1.4
+
+# Machine learning utilities
+scikit-learn==1.3.2
+
+# Visualization
+matplotlib==3.8.2
+
+# Progress bars and utilities
+tqdm==4.66.1
+
+# Image processing
+Pillow==10.1.0
